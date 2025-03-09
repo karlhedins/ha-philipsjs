@@ -8,7 +8,7 @@ from secrets import token_bytes, token_hex
 from base64 import b64decode, b64encode
 from functools import wraps
 
-
+import asyncio
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 from cryptography.hazmat.primitives.hashes import SHA1
@@ -29,6 +29,8 @@ from .typing import (
     ChannelType,
     ContextType,
     FavoriteListType,
+    HeadphonesVolume,
+    HeadphonesVolumeData,
     RecordingsListed,
     MenuItemsSettingsCurrent,
     MenuItemsSettingsCurrentPost,
@@ -64,6 +66,19 @@ TV_PLAYBACK_INTENTS = [
         }
     }
 ]
+
+POST_DATA_MENU_SCREEN_OFF = {
+    "intent": {
+        "extras": {"LAUNCH": "screen_off"},
+        "action": "Intent {}",
+        "component": {
+            "packageName": "org.droidtv.settings",
+            "className": "org.droidtv.settings.setupmenu.SetupMenuActivity",
+        },
+    }
+}
+
+HEADPHONE_MENU_NODEID = 2131230885
 
 HTTP_PORT = 1925
 HTTPS_PORT = 1926
@@ -250,6 +265,7 @@ class PhilipsTV(object):
         self.sources = {}
         self.source_id = None
         self.audio_volume = None
+        self.headphones_volume: Optional[HeadphonesVolume] = None
         self.channels = {}
         self.channel: Optional[Union[ActivitesTVType, ChannelsCurrentType]] = None
         self.channel_lists: Dict[str, ChannelListType] = {}
@@ -463,6 +479,34 @@ class PhilipsTV(object):
     def muted(self):
         if self.audio_volume:
             return self.audio_volume["muted"]
+        else:
+            return None
+
+    @property
+    def min_headphones_volume(self):
+        if self.headphones_volume:
+            return self.headphones_volume["min"]
+        else:
+            return None
+
+    @property
+    def max_headphones_volume(self):
+        if self.headphones_volume:
+            return self.headphones_volume["max"]
+        else:
+            return None
+
+    @property
+    def volume_headphones(self):
+        if self.headphones_volume and self.headphones_volume["max"]:
+            return self.headphones_volume["current"] / self.headphones_volume["max"]
+        else:
+            return None
+
+    @property
+    def muted_headphones(self):
+        if self.headphones_volume:
+            return self.headphones_volume["muted"]
         else:
             return None
 
@@ -747,11 +791,13 @@ class PhilipsTV(object):
 
             await self.getPowerState()
             await self.getAudiodata()
+            await self.getHeadphonesAudioData()
             await self.getSourceId()
             await self.getChannelId()
             await self.getApplication()
             await self.getContext()
-            await self.getScreenState()
+            # NOTE: not possible on our TV
+            # await self.getScreenState()
             await self.getAmbilightMode()
             await self.getAmbilightPower()
             await self.getAmbilightCurrentConfiguration()
@@ -798,6 +844,20 @@ class PhilipsTV(object):
         else:
             self.audio_volume = r
         return r
+
+    async def getHeadphonesAudioData(self):
+        r: HeadphonesVolumeData = await self.getMenuItemsSettingsCurrent([HEADPHONE_MENU_NODEID])
+        if r:
+            # Transform into the same format as audio_volume
+            self.headphones_volume = {
+                "muted": False,
+                "current": r["values"][0]["value"]["data"]["value"],
+                "min": 0,
+                "max": 60,
+            }
+        else:
+            self.headphones_volume = None
+        return self.headphones_volume
 
     async def getChannels(self):
         if self.api_version >= 5:
@@ -1043,6 +1103,27 @@ class PhilipsTV(object):
                 return True
         return False
 
+    async def setScreenOff(self):
+        """Turn the screen off, TV remains on with audio."""
+        if self.on:
+            await self.postReq("activities/launch", POST_DATA_MENU_SCREEN_OFF)
+            await asyncio.sleep(1)
+            await self.sendKey("Confirm")
+            # self.screenstate = "Off"
+            return True
+        return False
+
+
+    async def setScreenOn(self):
+        """Turn the screen on."""
+        if self.on:
+            await self.sendKey("Back")
+            await asyncio.sleep(8)
+            await self.sendKey("Back")
+            # self.screenstate = "On"
+            return True
+        return False
+
     async def getHueLampPower(self):
         if self.json_feature_supported("ambilight", "Hue"):
             r = await self.getReq("HueLamp/power")
@@ -1070,6 +1151,7 @@ class PhilipsTV(object):
         return False
 
     async def setVolume(self, level, muted=False):
+        """Set volume level, range 0..1."""
         data = {}
         if self.audio_volume is None or self.min_volume is None or self.max_volume is None:
             await self.getAudiodata()
@@ -1096,6 +1178,67 @@ class PhilipsTV(object):
             return False
 
         self.audio_volume.update(data)
+
+    async def _setHeadphonesVolumeInMenu(self, level, muted=False):
+        """Set internal headphones volume level, range 0..60."""
+        if muted:
+            return await self.postMenuItemsSettingsUpdateData({HEADPHONE_MENU_NODEID: {"value": 0}})
+        return await self.postMenuItemsSettingsUpdateData({HEADPHONE_MENU_NODEID: {"value": level}})
+
+    async def setHeadphonesVolume(self, level, muted=False):
+        """Set headphones volume level, range 0..1."""
+        data: HeadphonesVolume = {}
+        if self.headphones_volume is None or self.min_headphones_volume is None or self.max_headphones_volume is None:
+            await self.getHeadphonesAudioData()
+        assert self.headphones_volume is not None
+        assert self.max_headphones_volume is not None
+        assert self.min_headphones_volume is not None
+
+        if level is not None:
+            try:
+                targetlevel = int(level * self.max_headphones_volume)
+            except ValueError:
+                LOG.warning("Invalid headphones level %s" % str(level))
+                return False
+            if targetlevel < self.min_headphones_volume or targetlevel > self.max_headphones_volume:
+                LOG.warning(
+                    "Headphones level not in range (%i - %i)" % (self.min_headphones_volume, self.max_headphones_volume)
+                )
+                return False
+            data["current"] = targetlevel
+
+        data["muted"] = muted
+
+        if await self._setHeadphonesVolumeInMenu(data["current"], muted) is None:
+            return False
+
+        self.headphones_volume.update(data)
+        return True
+
+    async def headphonesVolumeUp(self):
+        if not self.headphones_volume:
+            return False
+        if self.headphones_volume["current"] < self.headphones_volume["max"]:
+            self.headphones_volume["current"] += 1
+            return await self._setHeadphonesVolumeInMenu(self.headphones_volume["current"])
+        return False
+
+    async def headphonesVolumeDown(self):
+        if not self.headphones_volume:
+            return False
+        if self.headphones_volume["current"] > self.headphones_volume["min"]:
+            self.headphones_volume["current"] -= 1
+            return await self._setHeadphonesVolumeInMenu(self.headphones_volume["current"])
+        return False
+
+    async def headphonesMute(self):
+        if not self.headphones_volume:
+            return False
+        # Toggle
+        self.headphones_volume["muted"] = not self.headphones_volume["muted"]
+        # TODO: need to store previous value if we want true toggle mute
+        return await self._setHeadphonesVolumeInMenu(self.headphones_volume["current"], self.headphones_volume["muted"])
+
 
     async def sendKey(self, key):
         res = await self.postReq("input/key", {"key": key}) is not None
@@ -1508,6 +1651,7 @@ class PhilipsTV(object):
             if "powerstate" in result:
                 self.powerstate = result["powerstate"]["powerstate"]
 
+            # TODO
             if "audio/volume" in result:
                 self.audio_volume = result["audio/volume"]
 

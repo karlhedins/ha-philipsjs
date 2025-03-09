@@ -410,3 +410,26 @@ class StringLocale(TypedDict):
 class StringsRequest(TypedDict):
     strings: List[StringId]
     locale: StringLocale
+
+# {'Nodeid': 2131230885, 'Controllable': True, 'Available': True, 'string_id': 'Hörlursvolym', 'data': {'value': 20}}
+class HeadphonesVolumeValueData(TypedDict):
+    Nodeid: int
+    Controllable: bool
+    Available: bool
+    string_id: str
+    data: MenuItemsSettingsValueInt
+
+# {'value': {'Nodeid': 2131230885, 'Controllable': True, 'Available': True, 'string_id': 'Hörlursvolym', 'data': {'value': 20}}}
+class HeadphonesVolumeValuesData(TypedDict):
+    value: HeadphonesVolumeValueData
+
+# {'values': [{'value': {'Nodeid': 2131230885, 'Controllable': True, 'Available': True, 'string_id': 'Hörlursvolym', 'data': {'value': 20}}}], 'version': 0}
+class HeadphonesVolumeData(TypedDict):
+    values: List[HeadphonesVolumeValuesData]
+    version: int
+
+class HeadphonesVolume(TypedDict):
+    muted: bool
+    current: int
+    min: int
+    max: int
